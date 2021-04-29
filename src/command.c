@@ -38,6 +38,8 @@
 #	include "traceswo.h"
 #endif
 
+#define IDP_MAX_FREQ 1000000
+
 typedef bool (*cmd_handler)(target *t, int argc, const char **argv);
 
 static bool cmd_version(target *t, int argc, char **argv);
@@ -129,7 +131,7 @@ int command_process(target *t, char *cmd)
 	return target_command(t, argc, argv);
 }
 
-#define BOARD_IDENT "Black Magic Probe" PLATFORM_IDENT FIRMWARE_VERSION
+#define BOARD_IDENT "UIUC Isolated Debug Probe" PLATFORM_IDENT FIRMWARE_VERSION
 
 bool cmd_version(target *t, int argc, char **argv)
 {
@@ -144,6 +146,7 @@ bool cmd_version(target *t, int argc, char **argv)
 #else
 	gdb_outf(", Hardware Version %d\n", platform_hwversion());
 #endif
+	gdb_out("Copyright (C) 2021 University of Illinois.\n");
 	gdb_out("Copyright (C) 2015  Black Sphere Technologies Ltd.\n");
 	gdb_out("License GPLv3+: GNU GPL version 3 or later "
 		"<http://gnu.org/licenses/gpl.html>\n\n");
@@ -174,17 +177,21 @@ static bool cmd_jtag_scan(target *t, int argc, char **argv)
 {
 	(void)t;
 	uint8_t irlens[argc];
-
+	/*
 	if (platform_target_voltage())
 		gdb_outf("Target voltage: %s\n", platform_target_voltage());
-
+	*/
 	if (argc > 1) {
 		/* Accept a list of IR lengths on command line */
 		for (int i = 1; i < argc; i++)
 			irlens[i-1] = atoi(argv[i]);
 		irlens[argc-1] = 0;
 	}
-
+	uint32_t freq = platform_max_frequency_get();
+	if (freq != FREQ_FIXED && freq > IDP_MAX_FREQ) {
+		platform_max_frequency_set(IDP_MAX_FREQ);
+		gdb_outf("[IDP] Changed debug frequency to 1M.  Use 'monitor frequency xxxx' to change after scanning.\n");
+	}
 	if(connect_assert_srst)
 		platform_srst_set_val(true); /* will be deasserted after attach */
 
@@ -222,9 +229,15 @@ bool cmd_swdp_scan(target *t, int argc, char **argv)
 	volatile uint32_t targetid = 0;
 	if (argc > 1)
 		targetid  = strtol(argv[1], NULL, 0);
+	/*
 	if (platform_target_voltage())
 		gdb_outf("Target voltage: %s\n", platform_target_voltage());
-
+	*/
+	uint32_t freq = platform_max_frequency_get();
+	if (freq != FREQ_FIXED && freq > IDP_MAX_FREQ) {
+		platform_max_frequency_set(IDP_MAX_FREQ);
+		gdb_outf("[IDP] Changed debug frequency to 1M.  Use 'monitor frequency xxxx' to change after scanning.\n");
+	}
 	if(connect_assert_srst)
 		platform_srst_set_val(true); /* will be deasserted after attach */
 
