@@ -151,7 +151,6 @@ bool cmd_version(target *t, int argc, char **argv)
 	gdb_out("Copyright (C) 2015  Black Sphere Technologies Ltd.\n");
 	gdb_out("License GPLv3+: GNU GPL version 3 or later "
 		"<http://gnu.org/licenses/gpl.html>\n\n");
-#endif
 
 	return true;
 }
