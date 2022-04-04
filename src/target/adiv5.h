@@ -45,6 +45,7 @@
 #define ADIV5_DP_VERSION_MASK 0xf000
 #define ADIV5_DPv1            0x1000
 #define ADIV5_DPv2            0x2000
+#define ADIV5_MINDP          0x10000
 
 /* AP Abort Register (ABORT) */
 /* Bits 31:5 - Reserved */
@@ -64,7 +65,7 @@
 #define ADIV5_DP_CTRLSTAT_CDBGRSTREQ	(1u << 26)
 /* Bits 25:24 - Reserved */
 /* Bits 23:12 - TRNCNT */
-#define ADIV5_DP_CTRLSTAT_TRNCNT
+#define ADIV5_DP_CTRLSTAT_TRNCNT        (1u << 12)
 /* Bits 11:8 - MASKLANE */
 #define ADIV5_DP_CTRLSTAT_MASKLANE
 /* Bits 7:6 - Reserved in JTAG-DP */
@@ -165,11 +166,9 @@ typedef struct ADIv5_DP_s {
 	void (*seq_out_parity)(uint32_t MS, int ticks);
 	uint32_t (*seq_in)(int ticks);
 	bool (*seq_in_parity)(uint32_t *ret, int ticks);
-	/* dp_low_write returns true if no OK resonse. */
+	/* dp_low_write returns true if no OK resonse, but ignores errors */
 	bool (*dp_low_write)(struct ADIv5_DP_s *dp, uint16_t addr,
 						 const uint32_t data);
-	/* dp_low_read returns true with parity error */
-	bool (*dp_low_read)(struct ADIv5_DP_s *dp, uint16_t addr, uint32_t *data);
 	uint32_t (*dp_read)(struct ADIv5_DP_s *dp, uint16_t addr);
 	uint32_t (*error)(struct ADIv5_DP_s *dp);
 	uint32_t (*low_access)(struct ADIv5_DP_s *dp, uint8_t RnW,
@@ -177,6 +176,7 @@ typedef struct ADIv5_DP_s {
 	void (*abort)(struct ADIv5_DP_s *dp, uint32_t abort);
 
 #if PC_HOSTED == 1
+	bmp_type_t dp_bmp_type;
 	bool (*ap_setup)(int i);
 	void (*ap_cleanup)(int i);
     void (*ap_regs_read)(ADIv5_AP_t *ap, void *data);
@@ -185,7 +185,6 @@ typedef struct ADIv5_DP_s {
 	void (*read_block)(uint32_t addr, uint8_t *data, int size);
 	void (*dap_write_block_sized)(uint32_t addr, uint8_t *data,
 								  int size, enum align align);
-
 #endif
 	uint32_t (*ap_read)(ADIv5_AP_t *ap, uint16_t addr);
 	void (*ap_write)(ADIv5_AP_t *ap, uint16_t addr, uint32_t value);
@@ -286,7 +285,7 @@ void adiv5_ap_ref(ADIv5_AP_t *ap);
 void adiv5_ap_unref(ADIv5_AP_t *ap);
 void platform_add_jtag_dev(const int dev_index, const jtag_dev_t *jtag_dev);
 
-void adiv5_jtag_dp_handler(uint8_t jd_index, uint32_t j_idcode);
+void adiv5_jtag_dp_handler(uint8_t jd_index);
 int platform_jtag_dp_init(ADIv5_DP_t *dp);
 int swdptap_init(ADIv5_DP_t *dp);
 
@@ -310,4 +309,5 @@ uint32_t fw_adiv5_jtagdp_read(ADIv5_DP_t *dp, uint16_t addr);
 uint32_t firmware_swdp_error(ADIv5_DP_t *dp);
 
 void firmware_swdp_abort(ADIv5_DP_t *dp, uint32_t abort);
+void adiv5_jtagdp_abort(ADIv5_DP_t *dp, uint32_t abort);
 #endif

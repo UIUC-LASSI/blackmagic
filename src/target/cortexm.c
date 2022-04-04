@@ -33,7 +33,6 @@
 #include "target.h"
 #include "target_internal.h"
 #include "cortexm.h"
-#include "platform.h"
 #include "command.h"
 #include "gdb_packet.h"
 
@@ -328,7 +327,7 @@ bool cortexm_probe(ADIv5_AP_t *ap)
 		break;
 	default:
 		if (ap->ap_designer != AP_DESIGNER_ATMEL) /* Protected Atmel device?*/{
-			DEBUG_WARN("Unexpected CortexM CPUID partno %04x\n", cpuid_partno);
+			DEBUG_WARN("Unexpected CortexM CPUID partno %04" PRIx32 "\n", cpuid_partno);
 		}
 	}
 	DEBUG_INFO("CPUID 0x%08" PRIx32 " (%s var %" PRIx32 " rev %" PRIx32 ")\n",
@@ -441,6 +440,7 @@ bool cortexm_probe(ADIv5_AP_t *ap)
 		if (ap->ap_partno == 0x4c0)  { /* Cortex-M0+ ROM */
 			if ((ap->dp->targetid & 0xfff) == AP_DESIGNER_RASPBERRY)
 				PROBE(rp_probe);
+			PROBE(lpc11xx_probe); /* LPC8 */
 		} else if (ap->ap_partno == 0x4c3)  { /* Cortex-M3 ROM */
 			PROBE(stm32f1_probe); /* Care for STM32F1 clones */
 			PROBE(lpc15xx_probe); /* Thanks to JojoS for testing */
@@ -471,13 +471,14 @@ bool cortexm_probe(ADIv5_AP_t *ap)
 		PROBE(lpc17xx_probe);
 	}
 #undef PROBE
-	/* Restart the CortexM we stopped for Romtable scan. Allow pure debug.*/
-	target_halt_resume(t, 0);
 	return true;
 }
 
 bool cortexm_attach(target *t)
 {
+	ADIv5_AP_t *ap = cortexm_ap(t);
+	ap->dp->fault = 1; /* Force switch to this multi-drop device*/
+	target_check_error(t);
 	struct cortexm_priv *priv = t->priv;
 	unsigned i;
 	uint32_t r;
@@ -526,7 +527,7 @@ bool cortexm_attach(target *t)
 		platform_timeout timeout;
 		platform_timeout_set(&timeout, 1000);
 		while (1) {
-			uint32_t dhcsr = target_mem_read32(t, CORTEXM_DHCSR);
+			dhcsr = target_mem_read32(t, CORTEXM_DHCSR);
 			if (!(dhcsr & CORTEXM_DHCSR_S_RESET_ST))
 				break;
 			if (platform_timeout_is_expired(&timeout)) {
@@ -572,8 +573,8 @@ static void cortexm_regs_read(target *t, void *data)
 		for(i = 0; i < sizeof(regnum_cortex_m) / 4; i++)
 			*regs++ = base_regs[regnum_cortex_m[i]];
 		if (t->target_options & TOPT_FLAVOUR_V7MF)
-			for(size_t t = 0; t < sizeof(regnum_cortex_mf) / 4; t++)
-			*regs++ = ap->dp->ap_reg_read(ap, regnum_cortex_mf[t]);
+			for(i = 0; i < sizeof(regnum_cortex_mf) / 4; i++)
+				*regs++ = ap->dp->ap_reg_read(ap, regnum_cortex_mf[i]);
 	}
 #else
 	if (0) {}
@@ -1214,8 +1215,8 @@ static int cortexm_hostio_request(target *t)
 
 	t->tc->interrupted = false;
 	target_regs_read(t, arm_regs);
-	target_mem_read(t, params, arm_regs[1], sizeof(params));
 	uint32_t syscall = arm_regs[0];
+	if (syscall != SYS_EXIT) target_mem_read(t, params, arm_regs[1], sizeof(params));
 	int32_t ret = 0;
 
 	DEBUG_INFO("syscall 0"PRIx32"%"PRIx32" (%"PRIx32" %"PRIx32" %"PRIx32" %"PRIx32")\n",
@@ -1605,7 +1606,7 @@ static int cortexm_hostio_request(target *t)
 #endif
 
 	case SYS_EXIT: /* _exit() */
-		tc_printf(t, "_exit(0x%x)\n", params[0]);
+		tc_printf(t, "_exit(0x%x)\n", arm_regs[1]);
 		target_halt_resume(t, 1);
 		break;
 

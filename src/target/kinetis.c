@@ -325,13 +325,45 @@ bool kinetis_probe(target *t)
 		kl_gen_add_flash(t, 0x00000000, 0x00040000, 0x800, K64_WRITE_LEN); /* P-Flash, 256 KB, 2 KB Sectors */
 		kl_gen_add_flash(t, 0x10000000, 0x00008000, 0x800, K64_WRITE_LEN); /* FlexNVM, 32 KB, 2 KB Sectors */
 		break;
+		/* gen1 s32k14x */
+		{
+			uint32_t sram_l, sram_h;
+			uint32_t flash, flexmem;
+	case 0x142: /* s32k142 */
+	case 0x143: /* s32k142w */
+		sram_l = 0x1FFFC000; /* SRAM_L, 16k */
+		sram_h = 0x03000;		 /* SRAM_H, 12k */
+		flash = 0x00040000;	 /* flash 256 KB */
+		flexmem = 0x10000;	 /* FlexNVM 64 KB */
+		goto do_common_s32k14x;
+	case 0x144: /* s32k144 */
+	case 0x145: /* s32k144w */
+		sram_l = 0x1FFF8000; /* SRAM_L, 32k */
+		sram_h = 0x07000;		 /* SRAM_H, 28k */
+		flash = 0x00080000;	 /* flash 512 KB */
+		flexmem = 0x10000;	 /* FlexNVM 64 KB */
+		goto do_common_s32k14x;
+	case 0x146: /* s32k146 */
+		sram_l = 0x1fff0000; /* SRAM_L, 64k */
+		sram_h = 0x0f000;		 /* SRAM_H, 60k */
+		flash = 0x00100000;	 /* flash 1024 KB */
+		flexmem = 0x10000;	 /* FlexNVM 64 KB */
+		goto do_common_s32k14x;
 	case 0x148: /* S32K148 */
-		t->driver = "S32K148";
-		target_add_ram(t, 0x1FFE0000, 0x20000); /* SRAM_L, 128 KB */
-		target_add_ram(t, 0x20000000, 0x1f000); /* SRAM_H, 124 KB */
-		kl_gen_add_flash(t, 0x00000000, 0x00180000, 0x1000, K64_WRITE_LEN); /* P-Flash, 1536 KB, 4 KB Sectors */
-		kl_gen_add_flash(t, 0x10000000, 0x80000, 0x1000, K64_WRITE_LEN); /* FlexNVM, 512 KB, 4 KB Sectors */
+		sram_l = 0x1ffe0000; /* SRAM_L, 128 KB */
+		sram_h = 0x1f000;		 /* SRAM_H, 124 KB */
+		flash = 0x00180000;	 /* flash 1536 KB */
+		flexmem = 0x80000;	 /* FlexNVM 512 KB */
+		goto do_common_s32k14x;
+do_common_s32k14x:
+		t->driver = "S32K14x";
+		target_add_ram(t, sram_l, 0x20000000 - sram_l);
+		target_add_ram(t, 0x20000000, sram_h);
+
+		kl_gen_add_flash(t, 0x00000000, flash, 0x1000, K64_WRITE_LEN);	 /* P-Flash, 4 KB Sectors */
+		kl_gen_add_flash(t, 0x10000000, flexmem, 0x1000, K64_WRITE_LEN); /* FlexNVM, 4 KB Sectors */
 		break;
+		}
 	default:
 		return false;
 	}
@@ -341,7 +373,7 @@ bool kinetis_probe(target *t)
 }
 
 static bool
-kl_gen_command(target *t, uint8_t cmd, uint32_t addr, const uint8_t data[8])
+kl_gen_command(target *t, uint8_t cmd, uint32_t addr, const uint32_t *data, int n_items)
 {
 	uint8_t fstat;
 
@@ -358,8 +390,9 @@ kl_gen_command(target *t, uint8_t cmd, uint32_t addr, const uint8_t data[8])
 	addr |= (uint32_t)cmd << 24;
 	target_mem_write32(t, FTFA_FCCOB_0, addr);
 	if (data) {
-		target_mem_write32(t, FTFA_FCCOB_1, *(uint32_t*)&data[0]);
-		target_mem_write32(t, FTFA_FCCOB_2, *(uint32_t*)&data[4]);
+		target_mem_write32(t, FTFA_FCCOB_1, data[0]);
+		if (n_items > 1)
+			target_mem_write32(t, FTFA_FCCOB_2, data[1]);
 	}
 
 	/* Enable execution by clearing CCIF */
@@ -379,7 +412,7 @@ kl_gen_command(target *t, uint8_t cmd, uint32_t addr, const uint8_t data[8])
 static int kl_gen_flash_erase(struct target_flash *f, target_addr addr, size_t len)
 {
 	while (len) {
-		if (kl_gen_command(f->t, FTFA_CMD_ERASE_SECTOR, addr, NULL)) {
+		if (kl_gen_command(f->t, FTFA_CMD_ERASE_SECTOR, addr, NULL, 0)) {
 			/* Different targets have different flash erase sizes */
 			if (len > f->blocksize)
 				len -= f->blocksize;
@@ -418,7 +451,7 @@ static int kl_gen_flash_write(struct target_flash *f,
 	}
 
 	while (len) {
-		if (kl_gen_command(f->t, write_cmd, dest, src)) {
+		if (kl_gen_command(f->t, write_cmd, dest, src, 1)) {
 			if (len > kf->write_len)
 				len -= kf->write_len;
 			else
@@ -452,12 +485,13 @@ static int kl_gen_flash_done(struct target_flash *f)
 		vals[1] = target_mem_read32(f->t, FLASH_SECURITY_BYTE_ADDRESS);
 		vals[1] = (vals[1] & 0xffffff00) | FLASH_SECURITY_BYTE_UNSECURED;
 		kl_gen_command(f->t, FTFE_CMD_PROGRAM_PHRASE,
-					   FLASH_SECURITY_BYTE_ADDRESS - 4, (uint8_t*)vals);
+					   FLASH_SECURITY_BYTE_ADDRESS - 4, vals, 2);
 	} else {
-		uint32_t val = target_mem_read32(f->t, FLASH_SECURITY_BYTE_ADDRESS);
-		val = (val & 0xffffff00) | FLASH_SECURITY_BYTE_UNSECURED;
+		uint32_t vals[1];
+		vals[0] = target_mem_read32(f->t, FLASH_SECURITY_BYTE_ADDRESS);
+		vals[0] = (vals[0] & 0xffffff00) | FLASH_SECURITY_BYTE_UNSECURED;
 		kl_gen_command(f->t, FTFA_CMD_PROGRAM_LONGWORD,
-					   FLASH_SECURITY_BYTE_ADDRESS, (uint8_t*)&val);
+					   FLASH_SECURITY_BYTE_ADDRESS, vals, 1);
 	}
 
 	return 0;

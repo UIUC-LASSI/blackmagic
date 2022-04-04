@@ -50,8 +50,12 @@
 #define TX_LED_ACT (1 << 0)
 #define RX_LED_ACT (1 << 1)
 
-#define RX_FIFO_SIZE (128)
-#define TX_BUF_SIZE (128)
+/* F072 with st_usbfs_v2_usb_drive drops characters at the 64 byte boundary!*/
+#if !defined(USART_DMA_BUF_SIZE)
+# define USART_DMA_BUF_SIZE 128
+#endif
+#define RX_FIFO_SIZE (USART_DMA_BUF_SIZE)
+#define TX_BUF_SIZE (USART_DMA_BUF_SIZE)
 
 /* TX double buffer */
 static uint8_t buf_tx[TX_BUF_SIZE * 2];
@@ -115,11 +119,21 @@ void usbuart_init(void)
 	usart_set_mode(USBUSART, USART_MODE_TX_RX);
 	usart_set_parity(USBUSART, USART_PARITY_NONE);
 	usart_set_flow_control(USBUSART, USART_FLOWCONTROL_NONE);
-	USBUSART_CR1 |= USART_CR1_IDLEIE;
+	USART_CR1(USBUSART) |= USART_CR1_IDLEIE;
 
 	/* Setup USART TX DMA */
+#if !defined(USBUSART_TDR) && defined(USBUSART_DR)
+# define USBUSART_TDR USBUSART_DR
+#else
+# define USBUSART_TDR USART_DR(USBUSART)
+#endif
+#if !defined(USBUSART_RDR) && defined(USBUSART_DR)
+# define USBUSART_RDR USBUSART_DR
+#else
+# define USBUSART_RDR USART_DR(USBUSART)
+#endif
 	dma_channel_reset(USBUSART_DMA_BUS, USBUSART_DMA_TX_CHAN);
-	dma_set_peripheral_address(USBUSART_DMA_BUS, USBUSART_DMA_TX_CHAN, (uint32_t)&USBUSART_DR);
+	dma_set_peripheral_address(USBUSART_DMA_BUS, USBUSART_DMA_TX_CHAN, (uint32_t)&USBUSART_TDR);
 	dma_enable_memory_increment_mode(USBUSART_DMA_BUS, USBUSART_DMA_TX_CHAN);
 	dma_set_peripheral_size(USBUSART_DMA_BUS, USBUSART_DMA_TX_CHAN, DMA_PSIZE_8BIT);
 	dma_set_memory_size(USBUSART_DMA_BUS, USBUSART_DMA_TX_CHAN, DMA_MSIZE_8BIT);
@@ -136,7 +150,7 @@ void usbuart_init(void)
 
 	/* Setup USART RX DMA */
 	dma_channel_reset(USBUSART_DMA_BUS, USBUSART_DMA_RX_CHAN);
-	dma_set_peripheral_address(USBUSART_DMA_BUS, USBUSART_DMA_RX_CHAN, (uint32_t)&USBUSART_DR);
+	dma_set_peripheral_address(USBUSART_DMA_BUS, USBUSART_DMA_RX_CHAN, (uint32_t)&USBUSART_RDR);
 	dma_set_memory_address(USBUSART_DMA_BUS, USBUSART_DMA_RX_CHAN, (uint32_t)buf_rx);
 	dma_set_number_of_data(USBUSART_DMA_BUS, USBUSART_DMA_RX_CHAN, RX_FIFO_SIZE);
 	dma_enable_memory_increment_mode(USBUSART_DMA_BUS, USBUSART_DMA_RX_CHAN);
@@ -158,11 +172,19 @@ void usbuart_init(void)
 
 	/* Enable interrupts */
 	nvic_set_priority(USBUSART_IRQ, IRQ_PRI_USBUSART);
+#if defined(USBUSART_DMA_RXTX_IRQ)
+	nvic_set_priority(USBUSART_DMA_RXTX_IRQ, IRQ_PRI_USBUSART_DMA);
+#else
 	nvic_set_priority(USBUSART_DMA_TX_IRQ, IRQ_PRI_USBUSART_DMA);
 	nvic_set_priority(USBUSART_DMA_RX_IRQ, IRQ_PRI_USBUSART_DMA);
+#endif
 	nvic_enable_irq(USBUSART_IRQ);
+#if defined(USBUSART_DMA_RXTX_IRQ)
+	nvic_enable_irq(USBUSART_DMA_RXTX_IRQ);
+#else
 	nvic_enable_irq(USBUSART_DMA_TX_IRQ);
 	nvic_enable_irq(USBUSART_DMA_RX_IRQ);
+#endif
 
 	/* Finally enable the USART */
 	usart_enable(USBUSART);
@@ -252,7 +274,8 @@ void usbuart_usb_out_cb(usbd_device *dev, uint8_t ep)
 	/* Don't bother if uart is disabled.
 	 * This will be the case on mini while we're being debugged.
 	 */
-	if(!(RCC_APB2ENR & RCC_APB2ENR_USART1EN))
+	if(!(RCC_APB2ENR & RCC_APB2ENR_USART1EN) &&
+	   !(RCC_APB1ENR & RCC_APB1ENR_USART2EN))
 	{
 		usbd_ep_nak_set(dev, CDCACM_UART_ENDPOINT, 0);
 		return;
@@ -384,57 +407,161 @@ static void usbuart_run(void)
 	nvic_enable_irq(USB_IRQ);
 }
 
+#if defined(USART_ICR)
+#define USBUSART_ISR_TEMPLATE(USART, DMA_IRQ) do {			\
+	nvic_disable_irq(DMA_IRQ);					\
+									\
+	/* Get IDLE flag and reset interrupt flags */ 			\
+	const bool isIdle = usart_get_flag(USART, USART_FLAG_IDLE);	\
+	usart_recv(USART);						\
+									\
+	/* If line is now idle, then transmit a packet */		\
+	if (isIdle) {							\
+		USART_ICR(USART) = USART_ICR_IDLECF;			\
+		usbuart_run();						\
+	}								\
+									\
+	nvic_enable_irq(DMA_IRQ);					\
+} while(0)
+#else
+#define USBUSART_ISR_TEMPLATE(USART, DMA_IRQ) do {			\
+	nvic_disable_irq(DMA_IRQ);					\
+									\
+	/* Get IDLE flag and reset interrupt flags */ 			\
+	const bool isIdle = usart_get_flag(USART, USART_FLAG_IDLE);	\
+	usart_recv(USART);						\
+									\
+	/* If line is now idle, then transmit a packet */		\
+	if (isIdle) {							\
+		/* On the older uarts, the sequence "read flags", */	\
+		/* "read DR" clears the flags                     */	\
+									\
+		usbuart_run();						\
+	}								\
+									\
+	nvic_enable_irq(DMA_IRQ);					\
+} while(0)
+#endif
+
+#if defined(USBUSART_ISR)
 void USBUSART_ISR(void)
 {
-	nvic_disable_irq(USBUSART_DMA_RX_IRQ);
-
-	/* Get IDLE flag and reset interrupt flags */
-	const bool isIdle = usart_get_flag(USBUSART, USART_FLAG_IDLE);
-	usart_recv(USBUSART);
-
-	/* If line is now idle, then transmit a packet */
-	if (isIdle)
-		usbuart_run();
-
-	nvic_enable_irq(USBUSART_DMA_RX_IRQ);
+#if defined(USBUSART_DMA_RXTX_IRQ)
+	USBUSART_ISR_TEMPLATE(USBUSART, USBUSART_DMA_RXTX_IRQ);
+#else
+	USBUSART_ISR_TEMPLATE(USBUSART, USBUSART_DMA_RX_IRQ);
+#endif
 }
+#endif
 
+#if defined(USBUSART1_ISR)
+void USBUSART1_ISR(void)
+{
+#if defined(USBUSART1_DMA_RXTX_IRQ)
+	USBUSART_ISR_TEMPLATE(USBUSART1, USBUSART1_DMA_RXTX_IRQ);
+#else
+	USBUSART_ISR_TEMPLATE(USBUSART1, USBUSART1_DMA_RX_IRQ);
+#endif
+}
+#endif
+
+#if defined(USBUSART2_ISR)
+void USBUSART2_ISR(void)
+{
+#if defined(USBUSART2_DMA_RXTX_IRQ)
+	USBUSART_ISR_TEMPLATE(USBUSART2, USBUSART2_DMA_RXTX_IRQ);
+#else
+	USBUSART_ISR_TEMPLATE(USBUSART2, USBUSART2_DMA_RX_IRQ);
+#endif
+}
+#endif
+
+#define USBUSART_DMA_TX_ISR_TEMPLATE(DMA_TX_CHAN) do {				\
+	nvic_disable_irq(USB_IRQ);						\
+										\
+	/* Stop DMA */								\
+	dma_disable_channel(USBUSART_DMA_BUS, DMA_TX_CHAN);			\
+	dma_clear_interrupt_flags(USBUSART_DMA_BUS, DMA_TX_CHAN, DMA_CGIF);	\
+										\
+	/* If new buffer is ready, continue transmission.			\
+	 * Otherwise report transfer completion.				\
+	 */									\
+	if (buf_tx_act_sz)							\
+	{									\
+		usbuart_change_dma_tx_buf();					\
+		usbd_ep_nak_set(usbdev, CDCACM_UART_ENDPOINT, 0);		\
+	}									\
+	else									\
+	{									\
+		usbuart_set_led_state(TX_LED_ACT, false);			\
+		tx_trfr_cplt = true;						\
+	}									\
+										\
+	nvic_enable_irq(USB_IRQ);						\
+} while(0)
+
+#if defined(USBUSART_DMA_TX_ISR)
 void USBUSART_DMA_TX_ISR(void)
 {
-	nvic_disable_irq(USB_IRQ);
-
-	/* Stop DMA */
-	dma_disable_channel(USBUSART_DMA_BUS, USBUSART_DMA_TX_CHAN);
-	dma_clear_interrupt_flags(USBUSART_DMA_BUS, USBUSART_DMA_TX_CHAN, DMA_CGIF);
-
-	/* If new buffer is ready, continue transmission.
-	 * Otherwise report transfer completion.
-	 */
-	if (buf_tx_act_sz)
-	{
-		usbuart_change_dma_tx_buf();
-		usbd_ep_nak_set(usbdev, CDCACM_UART_ENDPOINT, 0);
-	}
-	else
-	{
-		usbuart_set_led_state(TX_LED_ACT, false);
-		tx_trfr_cplt = true;
-	}
-
-	nvic_enable_irq(USB_IRQ);
+	USBUSART_DMA_TX_ISR_TEMPLATE(USBUSART_DMA_TX_CHAN);
 }
+#endif
 
+#if defined(USBUSART1_DMA_TX_ISR)
+void USBUSART1_DMA_TX_ISR(void)
+{
+	USBUSART_DMA_TX_ISR_TEMPLATE(USBUSART1_DMA_TX_CHAN);
+}
+#endif
+
+#if defined(USBUSART2_DMA_TX_ISR)
+void USBUSART2_DMA_TX_ISR(void)
+{
+	USBUSART_DMA_TX_ISR_TEMPLATE(USBUSART2_DMA_TX_CHAN);
+}
+#endif
+
+#define USBUSART_DMA_RX_ISR_TEMPLATE(USART_IRQ, DMA_RX_CHAN) do {		\
+	nvic_disable_irq(USART_IRQ);						\
+										\
+	/* Clear flags */							\
+	dma_clear_interrupt_flags(USBUSART_DMA_BUS, DMA_RX_CHAN, DMA_CGIF);	\
+	/* Transmit a packet */							\
+	usbuart_run();								\
+										\
+	nvic_enable_irq(USART_IRQ);						\
+} while(0)
+
+#if defined(USBUSART_DMA_RX_ISR)
 void USBUSART_DMA_RX_ISR(void)
 {
-	nvic_disable_irq(USBUSART_IRQ);
-
-	/* Clear flags */
-	dma_clear_interrupt_flags(USBUSART_DMA_BUS, USBUSART_DMA_RX_CHAN, DMA_CGIF);
-	/* Transmit a packet */
-	usbuart_run();
-
-	nvic_enable_irq(USBUSART_IRQ);
+	USBUSART_DMA_RX_ISR_TEMPLATE(USBUSART_IRQ, USBUSART_DMA_RX_CHAN);
 }
+#endif
+
+#if defined(USBUSART1_DMA_RX_ISR)
+void USBUSART1_DMA_RX_ISR(void)
+{
+	USBUSART_DMA_RX_ISR_TEMPLATE(USBUSART1_IRQ, USBUSART1_DMA_RX_CHAN);
+}
+#endif
+
+#if defined(USBUSART2_DMA_RX_ISR)
+void USBUSART2_DMA_RX_ISR(void)
+{
+	USBUSART_DMA_RX_ISR_TEMPLATE(USBUSART2_IRQ, USBUSART2_DMA_RX_CHAN);
+}
+#endif
+
+#if defined(USBUSART_DMA_RXTX_ISR)
+void USBUSART_DMA_RXTX_ISR(void)
+{
+	if (dma_get_interrupt_flag(USBUSART_DMA_BUS, USBUSART_DMA_RX_CHAN, DMA_CGIF))
+		USBUSART_DMA_RX_ISR();
+	if (dma_get_interrupt_flag(USBUSART_DMA_BUS, USBUSART_DMA_TX_CHAN, DMA_CGIF))
+		USBUSART_DMA_TX_ISR();
+}
+#endif
 
 #ifdef ENABLE_DEBUG
 enum {
